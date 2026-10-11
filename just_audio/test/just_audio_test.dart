@@ -176,6 +176,22 @@ void runTests() {
     await player.dispose();
   });
 
+  test('a failed disposePlayer does not leave the player unusable', () async {
+    final player = AudioPlayer();
+    await player.setUrl('https://foo.foo/foo.mp3');
+    // The native dispose throws once, and the per-player `dispose` fallback is
+    // not implemented, as on Android.
+    mock.failNextDisposePlayer = true;
+    await player.stop();
+    // Expected: the next load creates a fresh native player. Actual: it
+    // throws MissingPluginException (No implementation found for method
+    // dispose ...), and so does every later load, seek, pause or setSpeed.
+    final duration = await player.setUrl('https://bar.bar/bar.mp3');
+    expect(duration, equals(audioSourceDuration));
+    mock.failNextDisposePlayer = false;
+    await player.dispose();
+  });
+
   test('initial-seek-values', () async {
     final player = AudioPlayer();
     const targetPos = Duration(seconds: 2);
@@ -1724,6 +1740,11 @@ class MockJustAudio extends Mock
   MockAudioPlayer? mostRecentPlayer;
   final _players = <String, MockAudioPlayer>{};
 
+  /// Makes the next [disposePlayer] throw the way a native dispose that
+  /// throws reaches Dart, leaving that player's own `dispose` unimplemented
+  /// as on Android.
+  var failNextDisposePlayer = false;
+
   @override
   Future<AudioPlayerPlatform> init(InitRequest request) async {
     if (_players.containsKey(request.id)) {
@@ -1740,6 +1761,12 @@ class MockJustAudio extends Mock
   @override
   Future<DisposePlayerResponse> disposePlayer(
       DisposePlayerRequest request) async {
+    if (failNextDisposePlayer) {
+      failNextDisposePlayer = false;
+      _players[request.id]!.disposeUnimplemented = true;
+      throw PlatformException(
+          code: 'error', message: 'Reply already submitted');
+    }
     _players[request.id]!.dispose(DisposeRequest());
     _players.remove(request.id);
     return DisposePlayerResponse();
@@ -1808,6 +1835,9 @@ class MockAudioPlayer extends AudioPlayerPlatform {
   int? _errorCode;
   String? _errorMessage;
   Completer<void>? _loadBlock;
+
+  /// Android's per-player method channel has no `dispose` case.
+  var disposeUnimplemented = false;
 
   MockAudioPlayer(InitRequest request)
       : audioLoadConfiguration = request.audioLoadConfiguration,
@@ -2006,6 +2036,10 @@ class MockAudioPlayer extends AudioPlayerPlatform {
 
   @override
   Future<DisposeResponse> dispose(DisposeRequest request) async {
+    if (disposeUnimplemented) {
+      throw MissingPluginException('No implementation found for method dispose '
+          'on channel com.ryanheise.just_audio.methods.$id');
+    }
     await Future<dynamic>.delayed(const Duration(milliseconds: 10));
     _processingState = ProcessingStateMessage.idle;
     _errorCode = null;
